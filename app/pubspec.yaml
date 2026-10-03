@@ -1,5 +1,5 @@
 name: muse_companion
-description: "Muse Companion - a full-color Muse gadget companion app for Android (iOS, macOS and Windows to follow)."
+description: "Muse Desktop Companion - a desktop dashboard for your Muse: pixel avatar, chat, and link status."
 publish_to: 'none'
 
 version: 0.1.0+1
@@ -21,10 +21,6 @@ dependencies:
   shared_preferences: ^2.3.3
   # Image/character cache directory.
   path_provider: ^2.1.5
-  # Runtime permission requests (Bluetooth, notifications).
-  permission_handler: ^11.3.1
-  # Battery level for the device.health command.
-  battery_plus: ^6.2.1
 
   cupertino_icons: ^1.0.8
 

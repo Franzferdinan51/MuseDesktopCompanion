@@ -24,6 +24,10 @@
 
 import 'dart:async';
 
+import 'package:http/http.dart' as http;
+
+import 'chat_events.dart';
+import 'commands.dart';
 import 'identity.dart';
 import 'link_client.dart';
 import 'muse_api.dart';
@@ -115,7 +119,11 @@ class GadgetService {
     String? sdkToken,
     String displayName = 'Muse Companion',
     LinkConnector? connect,
+    http.Client? httpClient,
     ServiceLogger logger = _nullLogger,
+    this.onCharacterUrl,
+    bool introSent = false,
+    this.persistIntro,
   })  : _identity = identity,
         _commands = commands,
         _runCommand = runCommand,
@@ -124,34 +132,59 @@ class GadgetService {
         _sdkToken = sdkToken,
         _displayName = displayName,
         _connect = connect,
-        _logger = logger;
+        _httpClient = httpClient,
+        _logger = logger,
+        _introSent = introSent;
 
   final Identity _identity;
   final Map<String, Object?> _commands;
   final RunCommand _runCommand;
   final PairingStore _pairingStore;
   final String _version;
-  final String? _sdkToken;
+  String? _sdkToken;
   final String _displayName;
   final LinkConnector? _connect;
+  final http.Client? _httpClient;
   final ServiceLogger _logger;
+
+  /// Draws a character image discovered on `GET /identity`.
+  final Future<void> Function(String url)? onCharacterUrl;
+
+  /// Remembers that the setup message was accepted, across app launches.
+  /// Called with false when the pairing is removed.
+  final Future<void> Function(bool sent)? persistIntro;
 
   final StreamController<ConnectionState> _state =
       StreamController<ConnectionState>.broadcast();
+  final StreamController<ChatEvent> _chatEvents =
+      StreamController<ChatEvent>.broadcast();
 
   ConnectionState _connectionState = ConnectionState.stopped;
   String _statusDetail = '';
   bool _stopRequested = false;
   Completer<void>? _stopCompleter;
   Completer<void>? _sleepCompleter;
+  Timer? _sleepTimer;
   double _lastRefreshAttempt = double.negativeInfinity;
   bool _sdkTokenReportAttempted = false;
   LinkSession? _current;
   String? _agentName;
   Future<void>? _loop;
+  bool _introSent;
+  bool _introSkipLogged = false;
+  int _invokesSeen = 0;
+  int _resultsSent = 0;
+  String _lastCommand = '';
+  String _lastCommandResult = '';
+  final List<String> _linkLog = [];
+  final StreamController<void> _linkEvents =
+      StreamController<void>.broadcast();
 
   /// Broadcast connection-state changes for the UI.
   Stream<ConnectionState> get onStateChanged => _state.stream;
+
+  /// Assistant events from `/chat/subscribe`.
+  Stream<ChatEvent> get onChatEvent => _chatEvents.stream;
 
   ConnectionState get connectionState => _connectionState;
 
@@ -162,6 +195,34 @@ class GadgetService {
   String? get agentName => _agentName;
 
   bool get isRegistered => _current?.registeredAt != null;
+
+  /// Commands the phone has seen on the link since this process started.
+  int get invokesSeen => _invokesSeen;
+
+  /// `link.result` messages the phone has sent.
+  int get resultsSent => _resultsSent;
+
+  /// Last command name, without its result.
+  String get lastCommand => _lastCommand;
+
+  /// `command:ok` or `command:error` for the last result that left the phone.
+  String get lastCommandResult => _lastCommandResult;
+
+  /// Recent link log lines, oldest first. Capped at 30.
+  List<String> get linkLog => List.unmodifiable(_linkLog);
+
+  /// Fires when [linkLog] or the command counters change.
+  Stream<void> get onLink => _linkEvents.stream;
+
+  void _log(String message) {
+    _logger(message);
+    final line = message.length > 180 ? message.substring(0, 180) : message;
+    _linkLog.add(line);
+    if (_linkLog.length > 30) {
+      _linkLog.removeAt(0);
+    }
+    if (!_linkEvents.isClosed) _linkEvents.add(null);
+  }
 
   Identity get identity => _identity;
 
@@ -187,26 +248,67 @@ class GadgetService {
   /// Stop the loop and close the session.
   Future<void> stop() async {
     _stopRequested = true;
-    _stopCompleter?.complete();
-    _sleepCompleter?.complete();
+    final stopper = _stopCompleter;
+    if (stopper != null && !stopper.isCompleted) {
+      stopper.complete();
+    }
+    _wakeSleeper();
     await _loop;
     _setState(ConnectionState.stopped);
   }
 
+  /// Cut any current backoff or poll sleep short.
+  ///
+  /// The pairing wizard calls this after a new pairing is committed so
+  /// the loop picks it up immediately instead of sleeping out the
+  /// unpaired poll. Safe to call any time, even while stopped.
+  void wake() {
+    _wakeSleeper();
+  }
+
+  void _wakeSleeper() {
+    final sleeper = _sleepCompleter;
+    if (sleeper != null && !sleeper.isCompleted) {
+      sleeper.complete();
+    }
+    _sleepTimer?.cancel();
+  }
+
   /// Send a message to the Muse from this device.
+  ///
+  /// [attachments] carry a voice note or a camera frame. The returned map
+  /// is the post acknowledgement; the reply is delivered on [onChatEvent].
   Future<Map<String, Object?>> sendChat(String message,
-      [String? sessionId]) async {
+      [String? sessionId,
+      List<ChatAttachment> attachments = const []]) async {
     final session = _current;
     if (session == null || session.registeredAt == null) {
       return {'ok': false, 'error': 'not connected to the Muse'};
     }
-    return session.sendChat(message, sessionId);
+    return session.sendChat(message, sessionId, attachments);
   }
 
   /// Forget the saved pairing. The device identity is kept.
   Future<void> unpair() async {
     await _pairingStore.delete();
     _agentName = null;
+    await _clearIntro();
+  }
+
+  Future<void> _clearIntro() async {
+    _introSent = false;
+    _introSkipLogged = false;
+    final persist = persistIntro;
+    if (persist != null) await persist(false);
+  }
+
+  /// Update the SDK token reported on token refresh (null clears it).
+  ///
+  /// The next loop pass reports a newly set token, even when no rotation
+  /// is due; clearing it stops reporting without touching the pairing.
+  void setSdkToken(String? token) {
+    _sdkToken = (token == null || token.isEmpty) ? null : token;
+    _sdkTokenReportAttempted = false;
   }
 
   Future<void> _run() async {
@@ -214,7 +316,7 @@ class GadgetService {
     while (!_stopRequested) {
       final pairing = await _pairingStore.load();
       if (pairing == null) {
-        _logger('not paired; pair from the Muse app to set up');
+        _log('not paired; pair from the Muse app to set up');
         _setState(ConnectionState.unpaired);
         await _sleep(unpairedPollS);
         continue;
@@ -231,10 +333,11 @@ class GadgetService {
         _string(current, 'access_token'),
         root: api,
         version: _version,
+        client: _httpClient,
       );
       if (_stopRequested) break;
       if (fetched.status == 401) {
-        _logger('device token rejected by the API; refreshing');
+        _log('device token rejected by the API; refreshing');
         if (await _maybeRefresh(current, force: true) == null) {
           await _sleep(tokenRetryS);
         }
@@ -247,7 +350,7 @@ class GadgetService {
       vm ??= fetched.vms.isNotEmpty ? fetched.vms.first : null;
       if (vm == null) {
         final delay = backoff.nextDelay();
-        _logger('no VMs leased; retrying');
+        _log('no VMs leased; retrying');
         _setState(ConnectionState.waiting, _waitingDetail(delay, 'no Muse is available'));
         await _sleep(delay);
         continue;
@@ -258,7 +361,8 @@ class GadgetService {
       if (outcome == Outcome.unpaired) {
         await _pairingStore.delete();
         _agentName = null;
-        _logger('pairing removed; pair again to set up');
+        await _clearIntro();
+        _log('pairing removed; pair again to set up');
         _setState(ConnectionState.unpaired);
         continue;
       }
@@ -269,7 +373,7 @@ class GadgetService {
         backoff.floor = authBackoffMinS;
       }
       final delay = backoff.nextDelay();
-      _logger('reconnecting in ${delay.toStringAsFixed(0)}s');
+      _log('reconnecting in ${delay.toStringAsFixed(0)}s');
       _setState(ConnectionState.waiting,
           _waitingDetail(delay, _outcomeDetail(outcome)));
       await _sleep(delay);
@@ -313,19 +417,38 @@ class GadgetService {
       connect: _connect,
     );
     session.onStatus = (status) {
+      _log(status);
       if (status.startsWith('identity:')) {
         _agentName = status.substring('identity:'.length);
         if (_connectionState == ConnectionState.connected) {
           _setState(ConnectionState.connected, _agentName ?? '');
         }
+      } else if (status.startsWith('invoke:')) {
+        _invokesSeen += 1;
+        _lastCommand = status.substring('invoke:'.length);
+      } else if (status.startsWith('result:')) {
+        _resultsSent += 1;
+        _lastCommandResult = status.substring('result:'.length);
       }
+    };
+    session.onIdentity = (result) {
+      final url = avatarUrlFromIdentity(result);
+      final draw = onCharacterUrl;
+      if (url != null && draw != null) {
+        unawaited(draw(url));
+      }
+    };
+    session.onChatEvent = (event) {
+      if (!_chatEvents.isClosed) _chatEvents.add(event);
     };
     session.onRegistered = () {
       _setState(ConnectionState.connected, _agentName ?? 'registered');
     };
-    _logger('connecting to ${vm.vmName.isNotEmpty ? vm.vmName : vm.vmId}');
+    session.onSubscribed = () {
+      unawaited(_introduce(session));
+    };
+    _log('connecting to ${vm.vmName.isNotEmpty ? vm.vmName : vm.vmId}');
     _setState(ConnectionState.connecting, 'connecting to your Muse…');
-    final started = DateTime.now();
     _current = session;
     _setState(ConnectionState.connecting, 'registering…');
     Outcome outcome;
@@ -333,7 +456,7 @@ class GadgetService {
       outcome = await session.run(
           stopCompleter == null ? null : () => stopCompleter.future);
     } catch (e) {
-      _logger('session failed: $e');
+      _log('session failed: $e');
       outcome = Outcome.closed;
     } finally {
       if (identical(_current, session)) {
@@ -344,8 +467,37 @@ class GadgetService {
     final lasted = registeredAt == null
         ? 0.0
         : DateTime.now().difference(registeredAt).inMilliseconds / 1000;
-    _logger('session ended: ${outcome.name}');
+    _log('session ended: ${outcome.name}');
     return (outcome, lasted);
+  }
+
+  /// Ask the Muse to draw its character, once per pairing.
+  ///
+  /// The acceptance is persisted by [persistIntro]. Opening the app again
+  /// must not post the initialize message a second time. A rejected post
+  /// is retried on a later session. Unpair clears the flag.
+  Future<void> _introduce(LinkSession session) async {
+    if (_introSent) {
+      if (!_introSkipLogged) {
+        _introSkipLogged = true;
+        _log('setup message already sent');
+      }
+      return;
+    }
+    if (!identical(_current, session) || session.registeredAt == null) return;
+    // Claim the send before the await so a second subscribe cannot post
+    // another copy while this one is in flight.
+    _introSent = true;
+    final result = await session.sendChat(companionIntroMessage());
+    if (!identical(_current, session)) return;
+    if (result['ok'] == true) {
+      _log('asked the Muse for its character');
+      final persist = persistIntro;
+      if (persist != null) unawaited(persist(true));
+    } else {
+      _introSent = false;
+      _log('character intro was not accepted: ${result['error'] ?? result['status']}');
+    }
   }
 
   /// Return current pairing, rotating tokens first if they are due.
@@ -357,8 +509,10 @@ class GadgetService {
     final savedAt = pairing['access_token_saved_at'];
     final age = DateTime.now().millisecondsSinceEpoch / 1000 -
         (savedAt is num ? savedAt.toDouble() : 0);
-    final reportDue =
-        (_sdkToken != null && _sdkToken!.isNotEmpty) && !_sdkTokenReportAttempted;
+    final sdkToken = _sdkToken;
+    final reportDue = sdkToken != null &&
+        sdkToken.isNotEmpty &&
+        !_sdkTokenReportAttempted;
     final due = force || age >= tokenRefreshAgeS;
     if (!due && !reportDue) {
       return pairing;
@@ -370,7 +524,7 @@ class GadgetService {
     _lastRefreshAttempt = now;
     if (reportDue) {
       _sdkTokenReportAttempted = true;
-      _logger('refreshing device token to report the SDK token');
+      _log('refreshing device token to report the SDK token');
     }
     final refreshed = await refreshDeviceToken(
       _string(pairing, 'refresh_token'),
@@ -378,6 +532,7 @@ class GadgetService {
       root: apiRoot(_string(pairing, 'api_url_v2')),
       sdkToken: _sdkToken,
       version: _version,
+      client: _httpClient,
     );
     if (refreshed.tokens != null) {
       final next = Map<String, Object?>.from(pairing)
@@ -386,7 +541,7 @@ class GadgetService {
         ..['access_token_saved_at'] =
             DateTime.now().millisecondsSinceEpoch ~/ 1000;
       await _pairingStore.save(next);
-      _logger('device token rotated');
+      _log('device token rotated');
       // A successful rotation also reports the SDK token.
       _sdkTokenReportAttempted = true;
       return next;
@@ -394,12 +549,13 @@ class GadgetService {
     if (!due) {
       // Only reporting the SDK token: nothing has rejected the current
       // token, so a refusal here must never unpair the device.
-      _logger('SDK token report refresh failed; keeping the pairing');
+      _log('SDK token report refresh failed; keeping the pairing');
       return pairing;
     }
     if (refreshed.status == 401) {
       await _pairingStore.delete();
-      _logger('pairing revoked; pair again to set up');
+      await _clearIntro();
+      _log('pairing revoked; pair again to set up');
       _setState(ConnectionState.unpaired);
       return null;
     }
@@ -411,15 +567,23 @@ class GadgetService {
     if (_stopRequested) return;
     final completer = Completer<void>();
     _sleepCompleter = completer;
+    // A real Timer stored on the instance so an early wake via _wakeSleeper
+    // cancels it synchronously instead of leaving a dangling Future.delayed
+    // timer pending until it fires.
+    _sleepTimer?.cancel();
+    _sleepTimer = Timer(
+      Duration(milliseconds: (seconds * 1000).round()),
+      () {
+        if (identical(_sleepCompleter, completer)) {
+          _sleepCompleter = null;
+          completer.complete();
+        }
+      },
+    );
     try {
-      await Future.any([
-        Future<void>.delayed(Duration(milliseconds: (seconds * 1000).round())),
-        completer.future,
-      ]);
+      await completer.future;
     } finally {
-      if (identical(_sleepCompleter, completer)) {
-        _sleepCompleter = null;
-      }
+      _sleepTimer = null;
     }
   }
 

@@ -16,7 +16,7 @@
 // (linux/src/musegadget/link_client.py).
 //
 // One control session with a Muse VM. Opens a WebSocket to `/v1/noise`
-// with the per-VM Bearer [REDACTED] an Authorization header, runs the Noise XX
+// with the per-VM credential in an Authorization header, runs the Noise XX
 // handshake, then opens a long-lived `POST /link-control` stream. Both
 // directions of that stream carry JSON messages, each prefixed with its
 // length as a little-endian u32:
@@ -24,7 +24,9 @@
 //   * VM -> device: the register reply, `link.invoke` requests, and events
 //     such as `link.unpaired`.
 // Messages the device sends to the Muse ([LinkSession.sendChat]) go as
-// separate `POST /chat/stream` requests on the same session.
+// separate `POST /chat/stream` requests on the same session. Assistant
+// replies are not in that response: they arrive as NDJSON on a long-lived
+// `POST /chat/subscribe` stream opened after `link.register` succeeds.
 
 import 'dart:async';
 import 'dart:convert';
@@ -32,7 +34,9 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'chat_events.dart';
 import 'envelope.dart';
+import 'invoke.dart';
 import 'noise_xx.dart';
 import 'transport.dart';
 
@@ -115,7 +119,20 @@ Uint8List encodeMessage(Map<String, Object?> obj) {
 class MessageDecoder {
   final List<int> _bytes = [];
 
+  bool get isEmpty => _bytes.isEmpty;
+
   List<Map<String, Object?>> feed(Uint8List data) {
+    // A whole chunk that is JSON with no length prefix: one object, a
+    // list, or NDJSON. A length-prefixed frame whose low byte happens to
+    // be '{' fails this decode and falls through to the prefix parser.
+    // Treating that failure as a length is what used to stall or close
+    // the session, so every later command timed out.
+    if (_bytes.isEmpty &&
+        data.isNotEmpty &&
+        (data[0] == 0x7B || data[0] == 0x5B)) {
+      final bare = _bareJsonMessages(data);
+      if (bare != null) return bare;
+    }
     _bytes.addAll(data);
     final messages = <Map<String, Object?>>[];
     while (_bytes.length >= 4) {
@@ -136,10 +153,8 @@ class MessageDecoder {
       }
       try {
         final message = json.decode(utf8.decode(raw));
-        if (message is Map<String, Object?>) {
-          messages.add(message);
-        } else if (message is Map) {
-          messages.add(message.cast<String, Object?>());
+        if (message is Map) {
+          messages.add(_asControlMap(message));
         }
       } on FormatException {
         // Drop malformed control messages, as the reference does.
@@ -148,6 +163,84 @@ class MessageDecoder {
     }
     return messages;
   }
+}
+
+Map<String, Object?> _asControlMap(Map<dynamic, dynamic> message) {
+  return message.map((key, value) => MapEntry(key.toString(), value));
+}
+
+/// JSON text that is not length-prefixed, or null when [data] is not that.
+List<Map<String, Object?>>? _bareJsonMessages(Uint8List data) {
+  final text = utf8.decode(data, allowMalformed: true);
+  try {
+    final decoded = json.decode(text);
+    if (decoded is Map) return [_asControlMap(decoded)];
+    if (decoded is List) {
+      return [
+        for (final item in decoded)
+          if (item is Map) _asControlMap(item),
+      ];
+    }
+    return null;
+  } on FormatException {
+    final parsed = <Map<String, Object?>>[];
+    var lines = 0;
+    for (final line in text.split('\n')) {
+      final trimmed = line.trim();
+      if (trimmed.isEmpty) continue;
+      if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null;
+      try {
+        final decoded = json.decode(trimmed);
+        lines += 1;
+        if (decoded is Map) parsed.add(_asControlMap(decoded));
+      } on FormatException {
+        return null;
+      }
+    }
+    if (lines == 0) return null;
+    return parsed;
+  }
+}
+
+/// Pulls invoke objects out of a byte chunk that may be NDJSON, one JSON
+/// object, or length-prefixed control messages. Used for streams that are
+/// not the control stream, where a Hatch invoke can still arrive.
+List<Map<String, Object?>> invokeMapsIn(Uint8List data) {
+  final found = <Map<String, Object?>>[];
+  void consider(Object? decoded) {
+    if (decoded is! Map) return;
+    final map = _asControlMap(decoded);
+    if (parseInvoke(map) != null) found.add(map);
+  }
+
+  if (data.length >= 4) {
+    var offset = 0;
+    while (offset + 4 <= data.length) {
+      final length = data[offset] |
+          (data[offset + 1] << 8) |
+          (data[offset + 2] << 16) |
+          (data[offset + 3] << 24);
+      if (length <= 0 || length > maxInboundMessage) break;
+      if (offset + 4 + length > data.length) break;
+      try {
+        consider(json.decode(utf8.decode(data.sublist(offset + 4, offset + 4 + length))));
+      } on FormatException {
+        break;
+      }
+      offset += 4 + length;
+    }
+  }
+  final text = utf8.decode(data, allowMalformed: true);
+  for (final line in text.split('\n')) {
+    final trimmed = line.trim();
+    if (!trimmed.startsWith('{')) continue;
+    try {
+      consider(json.decode(trimmed));
+    } on FormatException {
+      continue;
+    }
+  }
+  return found;
 }
 
 String noiseUrl(String noiseHost, String vmId) {
@@ -199,6 +292,10 @@ class _Request {
   final BytesBuilder body = BytesBuilder();
   int bodyLength = 0;
 
+  /// When set, chunks are delivered as they arrive instead of being
+  /// buffered until the stream ends. Used by `/chat/subscribe`.
+  void Function(int status, Uint8List data, bool ended)? onChunk;
+
   void onFrame(DecryptedFrame frame) {
     if (done.isCompleted) return;
     if (frame.kind == DecryptedFrameKind.reset) {
@@ -217,6 +314,12 @@ class _Request {
       final chunk = frame.bodyChunk!;
       data = chunk.data ?? Uint8List(0);
       ended = chunk.endBody;
+    }
+    final chunkHandler = onChunk;
+    if (chunkHandler != null) {
+      chunkHandler(status, data, ended);
+      if (ended) done.complete((status, Uint8List(0)));
+      return;
     }
     body.add(data);
     bodyLength += data.length;
@@ -257,6 +360,7 @@ class LinkSession {
   int _inflightInvokes = 0;
   final List<Completer<void>> _invokeWaiters = [];
   final Set<Future<void>> _tasks = {};
+  final Map<int, MessageDecoder> _sideDecoders = {};
   int _streamId = 0;
   String _registerId = '';
   final Map<int, _Request> _requests = {};
@@ -271,6 +375,20 @@ class LinkSession {
   /// Called once the VM accepts `link.register`.
   void Function()? onRegistered;
 
+  /// Called once the reply subscription has been written to the socket,
+  /// so a following chat post is not missed.
+  void Function()? onSubscribed;
+
+  /// Fires for each assistant event on `/chat/subscribe`.
+  void Function(ChatEvent event)? onChatEvent;
+
+  /// Fires with the decoded `GET /identity` result object.
+  void Function(Map<String, Object?> result)? onIdentity;
+
+  int _subscribeAttempts = 0;
+  bool _subscribeOpen = false;
+  bool _alive = true;
+
   Future<Outcome> run(Future<void> Function()? waitForStop) async {
     late final LinkSocket socket;
     try {
@@ -279,31 +397,40 @@ class LinkSession {
       return rejected.status == 401 ? Outcome.authRejected : Outcome.forbidden;
     }
     _socket = socket;
+    // One subscription for the session lifetime: handshake and read loop
+    // share it so no frame is dropped between them.
+    final incoming = StreamIterator(socket.stream);
     try {
-      _transport = await _handshake(socket).timeout(handshakeTimeout);
+      _transport =
+          await _handshake(socket, incoming).timeout(handshakeTimeout);
       await _openControlStream();
-      _requestIdentity();
+      // Identity waits for the register ack. Opening it first races
+      // registration; the ESP32 session does the same wait.
       if (waitForStop == null) {
-        return await _readLoop();
+        return await _readLoop(incoming);
       }
       var stopNotified = false;
       final stopFuture = waitForStop().then((_) {
         stopNotified = true;
       });
-      final readFuture = _readLoop();
+      final readFuture = _readLoop(incoming);
       await Future.any([readFuture, stopFuture]);
       if (stopNotified) {
         return Outcome.stopped;
       }
       return await readFuture;
     } finally {
+      _alive = false;
       for (final request in _requests.values) {
         if (!request.done.isCompleted) {
           request.done.completeError(StateError('session ended'));
         }
       }
       _requests.clear();
+      // Close first so a pending moveNext in the read loop completes,
+      // then release the subscription.
       await socket.close();
+      await incoming.cancel();
     }
   }
 
@@ -338,13 +465,17 @@ class LinkSession {
     return int.tryParse(match.group(1)!);
   }
 
-  Future<NoiseTransport> _handshake(LinkSocket socket) async {
+  Future<NoiseTransport> _handshake(
+      LinkSocket socket, StreamIterator<Uint8List> incoming) async {
     final initiator = NoiseXXInitiator();
     await initiator.initialize();
     await socket.send(await initiator.writeMessage1());
-    final msg2 = await socket.stream.first;
+    if (!await incoming.moveNext()) {
+      throw StateError('connection closed during handshake');
+    }
+    final msg2 = incoming.current;
     await initiator.readMessage2(msg2);
-    // The Bearer [REDACTED] authenticated us at the upgrade; message 3
+    // The Authorization header authenticated us at upgrade; message 3
     // carries an empty payload.
     await socket.send(await initiator.writeMessage3());
     final (send, recv) = await initiator.split();
@@ -381,12 +512,15 @@ class LinkSession {
               await request.done.future.timeout(requestTimeout);
           if (status == 200 && response.isNotEmpty) {
             final decoded = json.decode(utf8.decode(response));
-            final result =
-                decoded is Map ? decoded['result'] : null;
-            final name = result is Map ? result['name'] : null;
-            if (name is String && name.isNotEmpty) {
-              agentName = name;
-              onStatus?.call('identity:$name');
+            final result = decoded is Map ? decoded['result'] : null;
+            if (result is Map) {
+              final cast = result.cast<String, Object?>();
+              final name = cast['name'];
+              if (name is String && name.isNotEmpty) {
+                agentName = name;
+                onStatus?.call('identity:$name');
+              }
+              onIdentity?.call(cast);
             }
           }
         } finally {
@@ -402,47 +536,62 @@ class LinkSession {
   ///
   /// [sessionId] targets a side chat; an id the Muse has not seen before
   /// starts a new one. Without it the message goes to the main chat.
+  /// [attachments] are voice notes or camera frames. The HTTP body is only
+  /// an acknowledgement; the reply arrives through [onChatEvent].
   Future<Map<String, Object?>> sendChat(String message,
-      [String? sessionId]) async {
+      [String? sessionId, List<ChatAttachment> attachments = const []]) async {
     final transport = _transport;
     if (transport == null) {
       return {'ok': false, 'error': 'not connected to the Muse'};
     }
-    final requestBody = <String, Object?>{
-      'message': message,
-      'device_id': _device.nodeId,
-    };
-    if (sessionId != null && sessionId.isNotEmpty) {
-      requestBody['session_id'] = sessionId;
+    if (message.trim().isEmpty && attachments.isEmpty) {
+      return {'ok': false, 'error': 'message is empty'};
     }
-    final body = Uint8List.fromList(utf8.encode(json.encode(requestBody)));
-    final headers = [
-      const Header('Content-Type', 'application/json'),
-      Header('x-request-id', newUuid()),
-      const Header('x-app-id', appId),
-    ];
-    final encrypted = await transport.encryptHttpRequest('POST', chatPath,
-        body: body, headers: headers);
-    final request = _Request();
-    _requests[encrypted.streamId] = request;
+    // Note: no registered gate here; the service layer refuses chats
+    // until the VM accepts link.register (mirroring the reference).
     try {
-      await _sendFrames(encrypted.frames);
-      final (status, response) =
-          await request.done.future.timeout(requestTimeout);
-      Object? decoded;
-      if (response.isNotEmpty) {
-        try {
-          decoded = json.decode(utf8.decode(response));
-        } on FormatException {
-          decoded = utf8.decode(response, allowMalformed: true);
-          if ((decoded as String).length > 2000) {
-            decoded = decoded.substring(0, 2000);
+      final requestBody = buildChatRequest(
+        message: message,
+        deviceId: _device.nodeId,
+        sessionId: sessionId,
+        attachments: attachments,
+      );
+      final body = Uint8List.fromList(utf8.encode(json.encode(requestBody)));
+      final headers = [
+        const Header('Content-Type', 'application/json'),
+        Header('x-request-id', newUuid()),
+        const Header('x-app-id', appId),
+      ];
+      final encrypted = await transport.encryptHttpRequest('POST', chatPath,
+          body: body, headers: headers);
+      final request = _Request();
+      _requests[encrypted.streamId] = request;
+      try {
+        await _sendFrames(encrypted.frames);
+        final (status, response) =
+            await request.done.future.timeout(requestTimeout);
+        Object? decoded;
+        if (response.isNotEmpty) {
+          try {
+            decoded = json.decode(utf8.decode(response));
+          } on FormatException {
+            decoded = utf8.decode(response, allowMalformed: true);
+            if ((decoded as String).length > 2000) {
+              decoded = decoded.substring(0, 2000);
+            }
           }
         }
+        return {
+          'ok': status >= 200 && status < 300,
+          'status': status,
+          'response': decoded
+        };
+      } finally {
+        _requests.remove(encrypted.streamId);
       }
-      return {'ok': status >= 200 && status < 300, 'status': status, 'response': decoded};
-    } finally {
-      _requests.remove(encrypted.streamId);
+    } catch (e) {
+      // The session ended mid-request (close, reset, timeout).
+      return {'ok': false, 'error': '$e'};
     }
   }
 
@@ -465,11 +614,11 @@ class LinkSession {
     return next;
   }
 
-  Future<Outcome> _readLoop() async {
+  Future<Outcome> _readLoop(StreamIterator<Uint8List> incoming) async {
     final decoder = MessageDecoder();
-    final socket = _socket!;
     final transport = _transport!;
-    await for (final raw in socket.stream) {
+    while (await incoming.moveNext()) {
+      final raw = incoming.current;
       DecryptedFrame? frame;
       try {
         frame = await transport.decryptFrame(raw);
@@ -480,25 +629,51 @@ class LinkSession {
         continue;
       }
       if (frame.streamId != _streamId) {
-        _requests[frame.streamId]?.onFrame(frame);
+        final pending = _requests[frame.streamId];
+        if (pending != null) {
+          pending.onFrame(frame);
+          if (frame.kind == DecryptedFrameKind.bodyChunk ||
+              frame.kind == DecryptedFrameKind.response) {
+            final bytes = frame.kind == DecryptedFrameKind.bodyChunk
+                ? frame.bodyChunk?.data
+                : frame.response?.body;
+            if (bytes != null && bytes.isNotEmpty) {
+              _dispatchInvokeMaps(invokeMapsIn(bytes),
+                  sourceStream: frame.streamId);
+            }
+          }
+          continue;
+        }
+        // The ESP32 session treats a body chunk on any stream that is not
+        // an outstanding request as a control message. Hatch's device.invoke
+        // has arrived that way; dropping it makes every command time out.
+        if (frame.kind == DecryptedFrameKind.bodyChunk) {
+          final data = frame.bodyChunk?.data ?? Uint8List(0);
+          final side = _sideDecoders.putIfAbsent(
+              frame.streamId, MessageDecoder.new);
+          try {
+            _dispatchAll(side.feed(data), sourceStream: frame.streamId);
+          } on ArgumentError {
+            _sideDecoders.remove(frame.streamId);
+          }
+        }
         continue;
       }
       if (frame.kind == DecryptedFrameKind.reset) {
         return Outcome.closed;
       }
       Uint8List data;
-      bool ended;
       if (frame.kind == DecryptedFrameKind.response) {
         final response = frame.response!;
         if (response.status >= 400) {
           return response.status == 403 ? Outcome.forbidden : Outcome.closed;
         }
         data = response.body ?? Uint8List(0);
-        ended = response.endBody;
+        // A finished opening response does not end the control stream.
+        // The firmware keeps reading body chunks after HTTP 200.
       } else {
         final chunk = frame.bodyChunk!;
         data = chunk.data ?? Uint8List(0);
-        ended = chunk.endBody;
       }
       List<Map<String, Object?>> messages;
       try {
@@ -506,26 +681,53 @@ class LinkSession {
       } on ArgumentError {
         return Outcome.closed;
       }
-      for (final message in messages) {
-        final outcome = _handle(message);
-        if (outcome != null) {
-          return outcome;
-        }
-      }
+      final outcome = _dispatchAll(messages);
+      if (outcome != null) return outcome;
       // Yield so invokes and timers run while frames stream in.
       await Future<void>.delayed(Duration.zero);
-      if (ended) {
-        return Outcome.closed;
-      }
     }
     return Outcome.closed;
   }
 
-  Outcome? _handle(Map<String, Object?> message) {
+  Outcome? _dispatchAll(List<Map<String, Object?>> messages,
+      {int? sourceStream}) {
+    for (final message in messages) {
+      final outcome = _handle(message, sourceStream: sourceStream);
+      if (outcome != null) return outcome;
+    }
+    return null;
+  }
+
+  void _dispatchInvokeMaps(List<Map<String, Object?>> messages,
+      {int? sourceStream}) {
+    for (final message in messages) {
+      _handle(message, sourceStream: sourceStream);
+    }
+  }
+
+  Outcome? _handle(Map<String, Object?> message, {int? sourceStream}) {
+    final method = message['method']?.toString();
+    final eventName = message['event']?.toString();
+    if (method != null) {
+      onStatus?.call(sourceStream == null
+          ? 'in:$method'
+          : 'in:$method stream:$sourceStream');
+    } else if (eventName != null) {
+      onStatus?.call('in:$eventName');
+    }
     if (message['id'] == _registerId && message['method'] == null) {
       if (message['error'] == null) {
         registeredAt = DateTime.now();
         onRegistered?.call();
+        // The firmware sends one heartbeat as soon as register is acked,
+        // then daily. The VM uses it as a sign the command path is up.
+        final beat = send({'method': 'link.heartbeat'});
+        _tasks.add(beat);
+        beat.whenComplete(() => _tasks.remove(beat));
+        final task = _openChatSubscription();
+        _tasks.add(task);
+        task.whenComplete(() => _tasks.remove(task));
+        _requestIdentity();
       }
       return null;
     }
@@ -533,35 +735,133 @@ class LinkSession {
     if (event == 'link.unpaired' || event == 'node.unpaired') {
       return Outcome.unpaired;
     }
-    if (message['method'] == 'link.invoke') {
-      final task = _invoke(message);
+    final parsed = parseInvoke(message);
+    if (parsed != null) {
+      final task = _invoke(parsed, sourceStream: sourceStream);
       _tasks.add(task);
       task.whenComplete(() => _tasks.remove(task));
     }
     return null;
   }
 
-  Future<void> _invoke(Map<String, Object?> message) async {
-    final invokeId = message['id'];
-    if (invokeId is! String || invokeId.isEmpty) return;
-    final command = message['command'];
-    final params = message['params'];
-    final timeoutMs = message['timeout_ms'];
+  Future<void> _invoke(ParsedInvoke invoke, {int? sourceStream}) async {
+    onStatus?.call('invoke:${invoke.command}');
+    if (sourceStream != null && sourceStream != _streamId) {
+      onStatus?.call('invoke stream:$sourceStream');
+    }
     await _acquireInvokeSlot();
     Map<String, Object?> result;
     try {
-      result = await _runCommand(
-        command is String ? command : '',
-        params is Map ? params.cast<String, Object?>() : <String, Object?>{},
-        timeoutMs is int ? timeoutMs : null,
-      );
+      if (invoke.command.isEmpty) {
+        result = {'ok': false, 'error': 'invoke had no command'};
+      } else {
+        final budget = invoke.timeoutMs ?? 30000;
+        final limit = Duration(milliseconds: budget.clamp(1000, 120000));
+        result = await _runCommand(
+          invoke.command,
+          invoke.params,
+          invoke.timeoutMs,
+        ).timeout(limit, onTimeout: () {
+          return {
+            'ok': false,
+            'error': 'command timed out on the phone',
+          };
+        });
+      }
+    } catch (e) {
+      result = {'ok': false, 'error': '$e'};
     } finally {
       _releaseInvokeSlot();
     }
+    final reply = <String, Object?>{
+      'method': 'link.result',
+      'id': invoke.id,
+      if (invoke.replyType != null) 'type': invoke.replyType,
+      ...result,
+    };
     try {
-      await send({'method': 'link.result', 'id': invokeId, ...result});
-    } catch (_) {
-      // The session is gone; nothing left to report to.
+      await send(reply);
+      // Firmware always answers on the control stream. When the invoke
+      // arrived on a different stream, also write the same result there
+      // so a waiter bound to that stream is not left until timeout.
+      if (sourceStream != null &&
+          sourceStream != _streamId &&
+          _transport != null) {
+        final frames = await _transport!
+            .encryptBodyChunk(sourceStream, encodeMessage(reply));
+        await _sendFrames(frames);
+      }
+      final ok = result['ok'] == true ? 'ok' : 'error';
+      onStatus?.call('result:${invoke.command}:$ok');
+    } catch (e) {
+      onStatus?.call('result failed: $e');
+    }
+  }
+
+  /// Long-lived reply stream. Opened after register so events that follow
+  /// the intro message are not missed. Failures are reported and retried
+  /// a few times; command serving does not depend on it.
+  Future<void> _openChatSubscription() async {
+    if (_subscribeOpen || _transport == null || _socket == null) return;
+    if (_subscribeAttempts >= 3) return;
+    _subscribeAttempts += 1;
+    final transport = _transport!;
+    final body = Uint8List.fromList(utf8.encode('{}'));
+    final headers = [
+      const Header('Content-Type', 'application/json'),
+      const Header('Accept', 'application/x-ndjson'),
+      Header('x-request-id', newUuid()),
+      const Header('x-app-id', appId),
+    ];
+    final encrypted = await transport.encryptHttpRequest(
+        'POST', chatSubscribePath,
+        body: body, headers: headers);
+    final request = _Request();
+    final decoder = NdjsonEventDecoder();
+    request.onChunk = (status, data, ended) {
+      if (status >= 400) {
+        onStatus?.call('subscribe:$status');
+        return;
+      }
+      if (data.isNotEmpty) {
+        try {
+          for (final event in decoder.add(data)) {
+            onChatEvent?.call(event);
+          }
+        } on StateError catch (e) {
+          onStatus?.call('subscribe:$e');
+        }
+      }
+      if (ended) {
+        for (final event in decoder.flush()) {
+          onChatEvent?.call(event);
+        }
+        _subscribeOpen = false;
+      }
+    };
+    _requests[encrypted.streamId] = request;
+    _subscribeOpen = true;
+    var announced = false;
+    try {
+      await _sendFrames(encrypted.frames);
+      onStatus?.call('subscribed');
+      announced = true;
+      onSubscribed?.call();
+      await request.done.future;
+    } catch (e) {
+      onStatus?.call('subscribe ended: $e');
+    } finally {
+      _requests.remove(encrypted.streamId);
+      _subscribeOpen = false;
+    }
+    if (!announced && _subscribeAttempts >= 3) {
+      onSubscribed?.call();
+    }
+    if (_alive && registeredAt != null && _subscribeAttempts < 3) {
+      await Future<void>.delayed(const Duration(seconds: 1));
+      if (_alive && registeredAt != null) {
+        await _openChatSubscription();
+      }
     }
   }
 
@@ -570,6 +870,8 @@ class LinkSession {
       _inflightInvokes += 1;
       return;
     }
+    onStatus?.call(
+        'invoke queue: $_inflightInvokes in flight, ${_invokeWaiters.length + 1} waiting');
     final waiter = Completer<void>();
     _invokeWaiters.add(waiter);
     await waiter.future;
