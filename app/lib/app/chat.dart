@@ -49,11 +49,40 @@ class ChatMessage {
 
   /// Muse message id, so streamed deltas land on the same bubble.
   String? serverId;
+
+  /// Serialize for the on-disk history. Streaming state is normalized:
+  /// a restored message is always a finished, sent bubble.
+  Map<String, Object?> toJson() => {
+        'text': text,
+        'sentAt': sentAt.toIso8601String(),
+        'status': status.name,
+        'role': role.name,
+        'serverId': serverId,
+      };
+
+  /// Parse one persisted message. Returns null when the entry is corrupt.
+  static ChatMessage? fromJson(Map<String, Object?> json) {
+    final text = json['text'];
+    final sentAt = json['sentAt'];
+    if (text is! String || sentAt is! String) return null;
+    final parsedAt = DateTime.tryParse(sentAt);
+    if (parsedAt == null) return null;
+    final role = json['role'] == 'assistant' ? ChatRole.assistant : ChatRole.user;
+    return ChatMessage(
+      id: 0, // Reassigned by restoreMessages.
+      text: text,
+      sentAt: parsedAt,
+      status: ChatStatus.sent,
+      role: role,
+      streaming: false,
+      serverId: json['serverId'] is String ? json['serverId'] as String : null,
+    );
+  }
 }
 
-/// Session-scoped outgoing messages, oldest first, bounded in memory.
+/// Session-scoped messages, oldest first, bounded in memory and on disk.
 class ChatHistory {
-  ChatHistory({this.maxMessages = 100});
+  ChatHistory({this.maxMessages = 200});
 
   final int maxMessages;
   final List<ChatMessage> _messages = <ChatMessage>[];
@@ -277,6 +306,26 @@ class ChatHistory {
     _messages.clear();
     _lastReply = null;
     _activity = '';
+    _emit();
+  }
+
+  /// Restore messages loaded from disk (oldest first). Ids are
+  /// reassigned so they stay unique within this session.
+  void restoreMessages(List<ChatMessage> messages) {
+    for (final message in messages) {
+      _messages.add(
+        ChatMessage(
+          id: _nextId++,
+          text: message.text,
+          sentAt: message.sentAt,
+          status: ChatStatus.sent,
+          role: message.role,
+          streaming: false,
+          serverId: message.serverId,
+        ),
+      );
+    }
+    _trim();
     _emit();
   }
 

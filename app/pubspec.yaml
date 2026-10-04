@@ -29,6 +29,10 @@ dependencies:
   flutter_markdown: ^0.7.7
   # Window size, minimum size, and bounds persistence.
   window_manager: ^0.5.1
+  # Microphone capture for push-to-talk voice notes.
+  record: ^5.0.0
+  # Text-to-speech for spoken assistant replies.
+  flutter_tts: ^4.0.0
 
   cupertino_icons: ^1.0.8
 
@@ -37,6 +41,15 @@ dev_dependencies:
     sdk: flutter
 
   flutter_lints: ^6.0.0
+
+# record_linux 0.7.2 (pulled by record 5.x) only implements
+# record_platform_interface 1.2.0: later 1.x versions added abstract
+# members (startStream) and changed hasPermission's signature, which
+# breaks compilation since Flutter registers every federated Dart
+# plugin implementation on all platforms. Revisit when record 7+
+# (needs Flutter 3.44+) is adopted.
+dependency_overrides:
+  record_platform_interface: 1.2.0
 
 flutter:
   uses-material-design: true

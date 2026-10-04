@@ -22,9 +22,9 @@
 import 'dart:convert';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:muse_desktop_companion/src/gadget/identity.dart';
 import 'package:muse_desktop_companion/src/gadget/service.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import 'model.dart';
 
@@ -44,20 +44,40 @@ class SecurePairingStore implements PairingStore {
 
   @override
   Future<Map<String, Object?>?> load() async {
-    final raw = await _storage.read(key: _pairingKey);
-    if (raw == null || raw.isEmpty) return null;
-    final decoded = json.decode(raw) as Map<String, dynamic>;
-    return decoded.cast<String, Object?>();
+    try {
+      final raw = await _storage.read(key: _pairingKey);
+      if (raw == null || raw.isEmpty) return null;
+      final decoded = json.decode(raw) as Map<String, dynamic>;
+      return decoded.cast<String, Object?>();
+    } catch (_) {
+      // Keychain unavailable (e.g. unsigned macOS build) - fall back to prefs.
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_pairingKey);
+      if (raw == null || raw.isEmpty) return null;
+      final decoded = json.decode(raw) as Map<String, dynamic>;
+      return decoded.cast<String, Object?>();
+    }
   }
 
   @override
   Future<void> save(Map<String, Object?> pairing) async {
-    await _storage.write(key: _pairingKey, value: json.encode(pairing));
+    final value = json.encode(pairing);
+    try {
+      await _storage.write(key: _pairingKey, value: value);
+    } catch (_) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_pairingKey, value);
+    }
   }
 
   @override
   Future<void> delete() async {
-    await _storage.delete(key: _pairingKey);
+    try {
+      await _storage.delete(key: _pairingKey);
+    } catch (_) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_pairingKey);
+    }
   }
 }
 
@@ -71,12 +91,32 @@ class SecureSdkTokenStore {
 
   final FlutterSecureStorage _storage;
 
-  Future<String?> load() => _storage.read(key: _sdkTokenKey);
+  Future<String?> load() async {
+    try {
+      return await _storage.read(key: _sdkTokenKey);
+    } catch (_) {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getString(_sdkTokenKey);
+    }
+  }
 
-  Future<void> save(String token) =>
-      _storage.write(key: _sdkTokenKey, value: token);
+  Future<void> save(String token) async {
+    try {
+      await _storage.write(key: _sdkTokenKey, value: token);
+    } catch (_) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_sdkTokenKey, token);
+    }
+  }
 
-  Future<void> delete() => _storage.delete(key: _sdkTokenKey);
+  Future<void> delete() async {
+    try {
+      await _storage.delete(key: _sdkTokenKey);
+    } catch (_) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_sdkTokenKey);
+    }
+  }
 }
 
 /// A stable device identity persisted across upgrades and unpairings.

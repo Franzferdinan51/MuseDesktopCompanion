@@ -4,6 +4,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart' hide ConnectionState;
 
+import '../../app/chat_persistence.dart';
 import '../../app/desktop_commands.dart';
 import '../../app/model.dart';
 import '../../app/version.dart';
@@ -35,6 +36,19 @@ class _SettingsViewState extends State<SettingsView> {
     unawaited(ctx.settings.saveSettings(updated));
     ctx.log.add('settings', 'Theme set to $theme.');
     setState(() {});
+  }
+
+  Future<void> _setSpeakReplies(bool value) async {
+    final ctx = widget.ctx;
+    final updated = ctx.presentation.settings.copyWith(speakReplies: value);
+    ctx.presentation.applySettings(updated);
+    await ctx.settings.saveSettings(updated);
+    if (!value) {
+      // Stop anything currently playing when the user turns speech off.
+      await ctx.voice.stop();
+    }
+    ctx.log.add('settings', 'Speak replies ${value ? 'on' : 'off'}.');
+    if (mounted) setState(() {});
   }
 
   Future<void> _applyAvatarUrl() async {
@@ -224,18 +238,60 @@ class _SettingsViewState extends State<SettingsView> {
           ),
           const SizedBox(height: 12),
           _Section(
+            title: 'Voice',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    const Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Speak assistant replies'),
+                          SizedBox(height: 2),
+                          Text(
+                            'Read Muse\u2019s replies aloud on this device.',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.grey,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Switch(
+                      value: ctx.presentation.settings.speakReplies,
+                      onChanged: _setSpeakReplies,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.stop, size: 16),
+                  label: const Text('Stop speaking now'),
+                  onPressed: () => ctx.voice.stop(),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          _Section(
             title: 'Chat',
             child: OutlinedButton.icon(
               icon: const Icon(Icons.delete_outline, size: 16),
               label: const Text('Clear chat history'),
-              onPressed: () {
+              onPressed: () async {
                 ctx.chat.clear();
+                await clearChatHistoryFile();
                 ctx.log.add('settings', 'Chat history cleared.');
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Chat history cleared.'),
-                  ),
-                );
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Chat history cleared.'),
+                    ),
+                  );
+                }
               },
             ),
           ),

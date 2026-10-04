@@ -13,14 +13,17 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import 'app/approvals.dart';
 import 'app/captions.dart';
 import 'app/chat.dart';
+import 'app/chat_persistence.dart';
 import 'app/desktop_commands.dart';
 import 'app/log_buffer.dart';
 import 'app/model.dart';
 import 'app/avatar_motion.dart';
 import 'app/storage.dart';
 import 'app/version.dart';
+import 'app/voice.dart';
 import 'app/window_bounds.dart';
 import 'src/gadget/chat_events.dart';
 import 'src/gadget/service.dart';
@@ -127,7 +130,23 @@ class _BootstrapAppState extends State<_BootstrapApp> {
       log.add('link', 'Link state: ${state.name}');
     });
 
-    final chat = ChatHistory();
+    final chat = ChatHistory(maxMessages: kPersistedChatMessages);
+    final restored = await loadChatHistory();
+    if (restored.isNotEmpty) {
+      chat.restoreMessages(restored);
+      log.add('chat', 'Restored ${restored.length} messages from disk.');
+    }
+    // Debounced persistence: every change schedules a save 2s out so a
+    // streaming reply writes once, not per chunk.
+    Timer? saveTimer;
+    chat.stream.listen((_) {
+      saveTimer?.cancel();
+      saveTimer = Timer(const Duration(seconds: 2), () {
+        unawaited(saveChatHistory(chat));
+      });
+    });
+    final approvals = ApprovalQueue();
+    final voice = VoiceService();
     service.onChatEvent.listen((event) {
       chat.applyServerEvent(event.event, event.payload);
     });
@@ -159,6 +178,14 @@ class _BootstrapAppState extends State<_BootstrapApp> {
         unawaited(settings.saveStatus(caption));
       }
       presentation.applyPose(AvatarPose.idle);
+      if (presentation.settings.speakReplies && text.trim().isNotEmpty) {
+        unawaited(
+          voice.speak(
+            text,
+            volume: presentation.settings.speechVolume / 100.0,
+          ),
+        );
+      }
     };
 
     service.start();
@@ -171,6 +198,8 @@ class _BootstrapAppState extends State<_BootstrapApp> {
       sdkTokens: sdkTokens,
       pairingStore: pairingStore,
       log: log,
+      approvals: approvals,
+      voice: voice,
     );
   }
 
@@ -183,6 +212,16 @@ class _BootstrapAppState extends State<_BootstrapApp> {
   ) async {
     final ctx = _ctx;
     ctx?.log.add('command', '$command ${params.keys.join(',')}');
+    // Sensitive commands wait for the user in the Approvals view.
+    if (ctx != null && ApprovalQueue.requiresApproval(command)) {
+      ctx.log.add('approvals', 'Queued $command for approval.');
+      final approved = await ctx.approvals.request(command, params);
+      if (!approved) {
+        ctx.log.add('approvals', 'Denied $command.');
+        return {'ok': false, 'error': 'denied by user'};
+      }
+      ctx.log.add('approvals', 'Approved $command — running.');
+    }
     switch (command) {
       case 'companion.set_status':
       case 'pocket.set_status':
