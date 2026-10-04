@@ -130,12 +130,24 @@ class PersistentIdentity {
   static Future<PersistentIdentity> loadOrCreate(
     FlutterSecureStorage storage,
   ) async {
-    final saved = await storage.read(key: _identityKey);
+    String? saved;
+    try {
+      saved = await storage.read(key: _identityKey);
+    } catch (_) {
+      // Keychain unavailable - fall back to SharedPreferences.
+      final prefs = await SharedPreferences.getInstance();
+      saved = prefs.getString(_identityKey);
+    }
     final mac = (saved != null && saved.isNotEmpty && isValidIdentityMac(saved))
         ? saved
         : generateMac();
     if (saved == null || saved != mac) {
-      await storage.write(key: _identityKey, value: mac);
+      try {
+        await storage.write(key: _identityKey, value: mac);
+      } catch (_) {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(_identityKey, mac);
+      }
     }
     return PersistentIdentity(Identity(mac));
   }
