@@ -1,8 +1,8 @@
 import 'dart:math' as math;
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:muse_companion/app/avatar_life.dart';
-import 'package:muse_companion/app/avatar_motion.dart';
+import 'package:muse_desktop_companion/app/avatar_life.dart';
+import 'package:muse_desktop_companion/app/avatar_motion.dart';
 
 void main() {
   test('schemes match muse_pixel.c', () {

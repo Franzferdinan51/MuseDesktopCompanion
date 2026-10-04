@@ -16,18 +16,20 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'app/captions.dart';
 import 'app/chat.dart';
 import 'app/desktop_commands.dart';
+import 'app/log_buffer.dart';
 import 'app/model.dart';
 import 'app/avatar_motion.dart';
 import 'app/storage.dart';
+import 'app/version.dart';
+import 'app/window_bounds.dart';
 import 'src/gadget/chat_events.dart';
 import 'src/gadget/service.dart';
-import 'ui/dashboard_screen.dart';
+import 'ui/app_shell.dart';
 import 'ui/muse_theme.dart';
-
-const String _appVersion = '0.1.0';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await initWindowBounds();
   runApp(const _BootstrapApp());
 }
 
@@ -44,10 +46,13 @@ class _BootstrapAppState extends State<_BootstrapApp> {
   _InitState _state = _InitState.loading;
   String _error = '';
   DashboardContext? _ctx;
+  StreamSubscription<void>? _presentationSub;
+  final WindowBoundsSaver _boundsSaver = WindowBoundsSaver();
 
   @override
   void initState() {
     super.initState();
+    _boundsSaver.attach();
     _init();
   }
 
@@ -58,6 +63,11 @@ class _BootstrapAppState extends State<_BootstrapApp> {
         ctx.dispose();
         return;
       }
+      // Rebuild the MaterialApp when presentation settings change so the
+      // theme toggle takes effect immediately.
+      _presentationSub = ctx.presentation.stream.listen((_) {
+        if (mounted) setState(() {});
+      });
       setState(() {
         _ctx = ctx;
         _state = _InitState.ready;
@@ -87,6 +97,7 @@ class _BootstrapAppState extends State<_BootstrapApp> {
     final pairingStore = SecurePairingStore(storage);
     final sdkTokens = SecureSdkTokenStore(storage);
     final savedSdkToken = await sdkTokens.load();
+    final log = LogBuffer();
 
     // Desktop command set: avatar, status, and chat. Phone-only commands
     // (camera, calls, SMS, flashlight) are not registered here.
@@ -95,14 +106,26 @@ class _BootstrapAppState extends State<_BootstrapApp> {
       commands: desktopCommandSpecs(),
       runCommand: _runCommand,
       pairingStore: pairingStore,
-      version: _appVersion,
+      version: kAppVersion,
       sdkToken: savedSdkToken?.isEmpty == true ? null : savedSdkToken,
       displayName: 'Muse Desktop',
-      logger: (message) => debugPrint('[muse] $message'),
+      logger: (message) {
+        debugPrint('[muse] $message');
+        log.add('service', message);
+      },
       introSent: settings.loadIntroSent(),
       persistIntro: settings.saveIntroSent,
-      onCharacterUrl: (_) async {},
+      onCharacterUrl: (url) async {
+        if (url.isNotEmpty) {
+          log.add('avatar', 'Server pushed character URL.');
+          await _drawChatCharacter(presentation, url);
+        }
+      },
     );
+
+    service.onStateChanged.listen((state) {
+      log.add('link', 'Link state: ${state.name}');
+    });
 
     final chat = ChatHistory();
     service.onChatEvent.listen((event) {
@@ -139,6 +162,7 @@ class _BootstrapAppState extends State<_BootstrapApp> {
     };
 
     service.start();
+    log.add('link', 'Service started.');
     return DashboardContext(
       service: service,
       presentation: presentation,
@@ -146,6 +170,7 @@ class _BootstrapAppState extends State<_BootstrapApp> {
       chat: chat,
       sdkTokens: sdkTokens,
       pairingStore: pairingStore,
+      log: log,
     );
   }
 
@@ -157,6 +182,7 @@ class _BootstrapAppState extends State<_BootstrapApp> {
     int? timeoutMs,
   ) async {
     final ctx = _ctx;
+    ctx?.log.add('command', '$command ${params.keys.join(',')}');
     switch (command) {
       case 'companion.set_status':
       case 'pocket.set_status':
@@ -172,6 +198,7 @@ class _BootstrapAppState extends State<_BootstrapApp> {
           final result = await downloadCharacterBytes(url);
           if (result != null) {
             ctx.presentation.applyCharacter(result);
+            ctx.log.add('avatar', 'Avatar drawn from URL.');
             return {'ok': true};
           }
           return {'ok': false, 'error': 'download failed'};
@@ -181,23 +208,36 @@ class _BootstrapAppState extends State<_BootstrapApp> {
         ctx?.presentation.applyPlaceholder();
         return {'ok': true};
       case 'companion.set_display':
+        final theme = params['theme'];
+        if (theme is String &&
+            CompanionSettings.themeOptions.contains(theme) &&
+            ctx != null) {
+          final updated =
+              ctx.presentation.settings.copyWith(theme: theme);
+          ctx.presentation.applySettings(updated);
+          unawaited(ctx.settings.saveSettings(updated));
+          ctx.log.add('settings', 'Theme set to $theme by Muse.');
+        }
         return {'ok': true};
       case 'device.health':
-        return {
-          'ok': true,
-          'battery_level': 100,
-          'charging': true,
-          'model': 'Desktop',
-          'os': 'macOS',
-          'app_version': _appVersion,
-        };
+        return desktopDeviceHealth(kAppVersion);
       default:
         return {'ok': false, 'error': 'unsupported on desktop'};
     }
   }
 
+  ThemeMode _themeMode() {
+    return switch (_ctx?.presentation.settings.theme) {
+      'light' => ThemeMode.light,
+      'dark' => ThemeMode.dark,
+      _ => ThemeMode.system,
+    };
+  }
+
   @override
   void dispose() {
+    _presentationSub?.cancel();
+    _boundsSaver.detach();
     _ctx?.dispose();
     super.dispose();
   }
@@ -209,7 +249,7 @@ class _BootstrapAppState extends State<_BootstrapApp> {
       debugShowCheckedModeBanner: false,
       theme: museTheme(Brightness.light),
       darkTheme: museTheme(Brightness.dark),
-      themeMode: ThemeMode.system,
+      themeMode: _themeMode(),
       home: switch (_state) {
         _InitState.loading => const _LoadingScreen(),
         _InitState.error => _ErrorScreen(
@@ -222,7 +262,7 @@ class _BootstrapAppState extends State<_BootstrapApp> {
               _init();
             },
           ),
-        _InitState.ready => DashboardScreen(ctx: _ctx!),
+        _InitState.ready => AppShell(ctx: _ctx!),
       },
     );
   }

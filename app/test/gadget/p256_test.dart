@@ -3,8 +3,8 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:muse_companion/src/gadget/p256.dart';
-import 'package:muse_companion/src/gadget/pairing.dart'
+import 'package:muse_desktop_companion/src/gadget/p256.dart';
+import 'package:muse_desktop_companion/src/gadget/pairing.dart'
     show b64urlDecode, b64urlEncode;
 
 Map<String, Object?> _vector(String name) {

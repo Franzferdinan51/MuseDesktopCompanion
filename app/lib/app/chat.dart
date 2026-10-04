@@ -272,6 +272,14 @@ class ChatHistory {
     if (!_changes.isClosed) _changes.add(null);
   }
 
+  /// Remove all messages (Settings > Clear chat history).
+  void clear() {
+    _messages.clear();
+    _lastReply = null;
+    _activity = '';
+    _emit();
+  }
+
   void close() {
     if (!_changes.isClosed) _changes.close();
   }

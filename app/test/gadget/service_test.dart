@@ -5,16 +5,16 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:muse_companion/app/storage.dart';
-import 'package:muse_companion/src/gadget/chat_events.dart';
+import 'package:muse_desktop_companion/app/storage.dart';
+import 'package:muse_desktop_companion/src/gadget/chat_events.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:muse_companion/src/gadget/envelope.dart';
-import 'package:muse_companion/src/gadget/framing.dart';
-import 'package:muse_companion/src/gadget/identity.dart';
-import 'package:muse_companion/src/gadget/link_client.dart';
-import 'package:muse_companion/src/gadget/noise_xx.dart';
-import 'package:muse_companion/src/gadget/service.dart';
-import 'package:muse_companion/src/gadget/transport.dart';
+import 'package:muse_desktop_companion/src/gadget/envelope.dart';
+import 'package:muse_desktop_companion/src/gadget/framing.dart';
+import 'package:muse_desktop_companion/src/gadget/identity.dart';
+import 'package:muse_desktop_companion/src/gadget/link_client.dart';
+import 'package:muse_desktop_companion/src/gadget/noise_xx.dart';
+import 'package:muse_desktop_companion/src/gadget/service.dart';
+import 'package:muse_desktop_companion/src/gadget/transport.dart';
 
 Map<String, Object?> _pairing({int? savedAt}) => {
       'access_token': 'a1',

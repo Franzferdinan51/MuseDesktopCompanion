@@ -1,7 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:muse_companion/src/gadget/envelope.dart';
+import 'package:muse_desktop_companion/src/gadget/envelope.dart';
 
 void main() {
   group('header', () {

@@ -22,8 +22,8 @@
 import 'dart:convert';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:muse_companion/src/gadget/identity.dart';
-import 'package:muse_companion/src/gadget/service.dart';
+import 'package:muse_desktop_companion/src/gadget/identity.dart';
+import 'package:muse_desktop_companion/src/gadget/service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'model.dart';

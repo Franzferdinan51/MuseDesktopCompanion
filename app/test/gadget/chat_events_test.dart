@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:muse_companion/src/gadget/chat_events.dart';
+import 'package:muse_desktop_companion/src/gadget/chat_events.dart';
 
 void main() {
   test('chat posts include output modality and file items', () {

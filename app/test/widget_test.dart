@@ -2,10 +2,10 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:muse_companion/app/avatar_motion.dart';
-import 'package:muse_companion/app/chat.dart';
-import 'package:muse_companion/app/desktop_commands.dart';
-import 'package:muse_companion/app/model.dart';
+import 'package:muse_desktop_companion/app/avatar_motion.dart';
+import 'package:muse_desktop_companion/app/chat.dart';
+import 'package:muse_desktop_companion/app/desktop_commands.dart';
+import 'package:muse_desktop_companion/app/model.dart';
 
 void main() {
   test('desktop command specs include the avatar and status commands', () {

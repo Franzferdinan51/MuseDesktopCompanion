@@ -15,7 +15,7 @@
 // Test doubles for the CompanionDisplay / CompanionHealth platform sides used by
 // the real CompanionExecutor. They record calls so dispatch can be asserted.
 
-import 'package:muse_companion/src/gadget/commands.dart';
+import 'package:muse_desktop_companion/src/gadget/commands.dart';
 
 class CompanionDisplayStub implements CompanionDisplay {
   String? drawnUrl;

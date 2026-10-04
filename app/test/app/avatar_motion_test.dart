@@ -1,7 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:muse_companion/app/avatar_motion.dart';
+import 'package:muse_desktop_companion/app/avatar_motion.dart';
 
 void main() {
   test('idle bob peaks at one pixel-unit', () {

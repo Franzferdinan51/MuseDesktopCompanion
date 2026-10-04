@@ -13,7 +13,7 @@
 // limitations under the License.
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:muse_companion/app/chat.dart';
+import 'package:muse_desktop_companion/app/chat.dart';
 
 void main() {
   test('addSending records a sending message with a fresh id', () {

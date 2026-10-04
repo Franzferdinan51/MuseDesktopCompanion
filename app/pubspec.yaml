@@ -1,4 +1,4 @@
-name: muse_companion
+name: muse_desktop_companion
 description: "Muse Desktop Companion - a desktop dashboard for your Muse: pixel avatar, chat, and link status."
 publish_to: 'none'
 
@@ -21,6 +21,14 @@ dependencies:
   shared_preferences: ^2.3.3
   # Image/character cache directory.
   path_provider: ^2.1.5
+  # Real battery level/charging state for device.health.
+  battery_plus: ^6.2.3
+  # Real device model / OS version for device.health.
+  device_info_plus: ^12.4.0
+  # Markdown rendering in chat bubbles.
+  flutter_markdown: ^0.7.7
+  # Window size, minimum size, and bounds persistence.
+  window_manager: ^0.5.1
 
   cupertino_icons: ^1.0.8
 

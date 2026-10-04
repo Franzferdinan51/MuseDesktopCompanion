@@ -2,8 +2,8 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:muse_companion/app/avatar_motion.dart';
-import 'package:muse_companion/app/pixel_avatar.dart';
+import 'package:muse_desktop_companion/app/avatar_motion.dart';
+import 'package:muse_desktop_companion/app/pixel_avatar.dart';
 
 void main() {
   test('scale map matches muse_pixel_set_size', () {

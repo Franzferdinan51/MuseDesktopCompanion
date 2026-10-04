@@ -23,9 +23,9 @@
 import 'dart:async';
 import 'dart:typed_data';
 
-import 'package:muse_companion/app/avatar_motion.dart';
-import 'package:muse_companion/src/gadget/commands.dart';
-import 'package:muse_companion/src/gadget/service.dart';
+import 'package:muse_desktop_companion/app/avatar_motion.dart';
+import 'package:muse_desktop_companion/src/gadget/commands.dart';
+import 'package:muse_desktop_companion/src/gadget/service.dart';
 
 /// Short link label shared by the home bar, the dashboard, and Settings.
 ///

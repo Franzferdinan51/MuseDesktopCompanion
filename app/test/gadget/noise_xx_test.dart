@@ -2,7 +2,7 @@ import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart' hide CipherState;
 import 'package:flutter_test/flutter_test.dart';
-import 'package:muse_companion/src/gadget/noise_xx.dart';
+import 'package:muse_desktop_companion/src/gadget/noise_xx.dart';
 
 Uint8List _hex(String s) {
   final out = Uint8List(s.length ~/ 2);

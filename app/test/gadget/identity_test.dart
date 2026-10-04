@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:muse_companion/src/gadget/identity.dart';
+import 'package:muse_desktop_companion/src/gadget/identity.dart';
 
 void main() {
   group('identity', () {

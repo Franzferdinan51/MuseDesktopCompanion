@@ -4,8 +4,8 @@ import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart' hide CipherState;
 import 'package:flutter_test/flutter_test.dart';
-import 'package:muse_companion/src/gadget/p256.dart';
-import 'package:muse_companion/src/gadget/pairing.dart';
+import 'package:muse_desktop_companion/src/gadget/p256.dart';
+import 'package:muse_desktop_companion/src/gadget/pairing.dart';
 
 Map<String, Map<String, Object?>> _loadVectors() {
   final file = File('test/testdata/link_pairing_v5.json');

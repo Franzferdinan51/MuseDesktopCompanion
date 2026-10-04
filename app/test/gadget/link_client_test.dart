@@ -3,12 +3,12 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:muse_companion/src/gadget/chat_events.dart';
-import 'package:muse_companion/src/gadget/envelope.dart';
-import 'package:muse_companion/src/gadget/framing.dart';
-import 'package:muse_companion/src/gadget/link_client.dart';
-import 'package:muse_companion/src/gadget/noise_xx.dart';
-import 'package:muse_companion/src/gadget/transport.dart';
+import 'package:muse_desktop_companion/src/gadget/chat_events.dart';
+import 'package:muse_desktop_companion/src/gadget/envelope.dart';
+import 'package:muse_desktop_companion/src/gadget/framing.dart';
+import 'package:muse_desktop_companion/src/gadget/link_client.dart';
+import 'package:muse_desktop_companion/src/gadget/noise_xx.dart';
+import 'package:muse_desktop_companion/src/gadget/transport.dart';
 
 final _device = DeviceDescription(
   nodeId: 'homelink-abcdef',

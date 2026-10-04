@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:muse_companion/app/captions.dart';
+import 'package:muse_desktop_companion/app/captions.dart';
 
 void main() {
   test('captions drop markdown and stay short', () {

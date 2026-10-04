@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:muse_companion/src/gadget/muse_api.dart';
+import 'package:muse_desktop_companion/src/gadget/muse_api.dart';
 
 void main() {
   group('api root', () {

@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:muse_companion/src/gadget/invoke.dart';
+import 'package:muse_desktop_companion/src/gadget/invoke.dart';
 
 void main() {
   test('link.invoke keeps a top-level command', () {

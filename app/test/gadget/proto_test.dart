@@ -4,7 +4,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:muse_companion/src/gadget/proto.dart';
+import 'package:muse_desktop_companion/src/gadget/proto.dart';
 
 void main() {
   group('varint', () {
